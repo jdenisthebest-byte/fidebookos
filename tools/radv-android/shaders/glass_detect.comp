@@ -1,0 +1,162 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "glass_common.glsl"
+
+// Multi-panel detector. It only proposes regions; apply independently validates
+// each pixel and each optical sample before changing the real composition.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, rgba8) readonly uniform image2D u_ov0;
+layout(set = 0, binding = 1, rgba8) readonly uniform image2D u_ov1;
+layout(set = 0, binding = 2, rgba8) readonly uniform image2D u_ov2;
+layout(set = 0, binding = 3) buffer BoxBuf {
+    uvec4 hdr;
+    ivec4 rects[8];
+    vec4  params[8];
+} b_boxes;
+
+shared uint s_dock_x0;
+shared uint s_dock_y0;
+shared uint s_dock_x1;
+shared uint s_dock_y1;
+shared uint s_dock_hits;
+shared uint s_col_hits[1024];
+shared uint s_col_y0[1024];
+shared uint s_col_y1[1024];
+shared uint s_num_rects;
+
+vec4 load_ov(int k, ivec2 c) {
+    if (k == 0) return imageLoad(u_ov0, c);
+    if (k == 1) return imageLoad(u_ov1, c);
+    return imageLoad(u_ov2, c);
+}
+
+bool is_translucent_carrier(vec4 v) {
+    // Control Center panel, inner QS tiles, Notification Shade and App Menu.
+    return v.a >= 0.085 && v.a <= 0.50;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (pc.dims.x <= 0 || pc.dims.y <= 0) {
+        if (tid == 0u) b_boxes.hdr = uvec4(0u);
+        return;
+    }
+    int gw = min((pc.dims.x + 3) / 4, 1024);
+    int gh = (pc.dims.y + 3) / 4;
+    int dock_split_y = max(pc.dims.y - 148, pc.dims.y * 4 / 5);
+
+    if (tid == 0u) s_num_rects = 0u;
+    barrier();
+
+    for (int k = 0; k < pc.ov_count && k < 3; k++) {
+        if (tid == 0u) {
+            s_dock_x0 = 99999u;
+            s_dock_y0 = 99999u;
+            s_dock_x1 = 0u;
+            s_dock_y1 = 0u;
+            s_dock_hits = 0u;
+        }
+        for (uint c = tid; c < uint(gw); c += 256u) {
+            s_col_hits[c] = 0u;
+            s_col_y0[c] = 99999u;
+            s_col_y1[c] = 0u;
+        }
+        barrier();
+
+        // An opaque carrier needs an explicitly validated, aligned scene image.
+        // A producer tag or an arbitrary raw app AHB is not such validation.
+        ivec2 probe = clamp(ivec2(pc.dims.x / 2, max(32, pc.dims.y / 3)),
+                            ivec2(0), pc.dims - ivec2(1));
+        vec4 top_probe = load_ov(k, probe);
+        bool allow_opaque_dock = pc.bg_valid != 0 && top_probe.a < 0.55;
+
+        uint total_cells = uint(gw * gh);
+        for (uint idx = tid; idx < total_cells; idx += 256u) {
+            int gx = int(idx % uint(gw));
+            int gy = int(idx / uint(gw));
+            ivec2 px = ivec2(min(gx * 4 + 1, pc.dims.x - 1), min(gy * 4 + 1, pc.dims.y - 1));
+            vec4 v = load_ov(k, px);
+            bool trans_hit = is_translucent_carrier(v);
+            bool dock_carrier_hit = allow_opaque_dock && px.y >= dock_split_y && is_taskbar_carrier(v);
+            if (trans_hit || dock_carrier_hit) {
+                if (px.y >= dock_split_y) {
+                    atomicMin(s_dock_x0, uint(gx * 4));
+                    atomicMax(s_dock_x1, uint(min(gx * 4 + 4, pc.dims.x)));
+                    atomicMin(s_dock_y0, uint(gy * 4));
+                    atomicMax(s_dock_y1, uint(min(gy * 4 + 4, pc.dims.y)));
+                    atomicAdd(s_dock_hits, 1u);
+                } else if (trans_hit && px.y >= 24) {
+                    atomicAdd(s_col_hits[gx], 1u);
+                    atomicMin(s_col_y0[gx], uint(gy * 4));
+                    atomicMax(s_col_y1[gx], uint(min(gy * 4 + 4, dock_split_y)));
+                }
+            }
+        }
+        barrier();
+
+        if (tid == 0u) {
+            // 1. Taskbar / Dock capsule or persistent bar.
+            if (s_dock_hits >= 12u && s_dock_x1 > s_dock_x0 + 100u && s_dock_y1 > s_dock_y0 + 24u && s_num_rects < 8u) {
+                int x0 = int(s_dock_x0);
+                int y0 = int(s_dock_y0);
+                int x1 = int(s_dock_x1);
+                int y1 = int(s_dock_y1);
+                float h_box = float(y1 - y0);
+                float rad = (x1 - x0 >= pc.dims.x - 16) ? 20.0 : min(26.0, h_box * 0.48);
+                float bev = max(22.0, min(34.0, h_box * 0.52));
+                uint slot = s_num_rects++;
+                b_boxes.rects[slot] = ivec4(x0, y0, x1, y1);
+                b_boxes.params[slot] = vec4(rad, bev, 1.0, float(k));
+            }
+
+            // 2. Control Center (QS), Notification Shade and App Menu.
+            int c = 0;
+            while (c < gw && s_num_rects < 8u) {
+                if (s_col_hits[c] < 4u) {
+                    c++;
+                    continue;
+                }
+                int c_start = c;
+                int c_end = c;
+                uint min_y = s_col_y0[c];
+                uint max_y = s_col_y1[c];
+                uint sum_hits = s_col_hits[c];
+                c++;
+                while (c < gw) {
+                    if (s_col_hits[c] >= 4u) {
+                        c_end = c;
+                        min_y = min(min_y, s_col_y0[c]);
+                        max_y = max(max_y, s_col_y1[c]);
+                        sum_hits += s_col_hits[c];
+                        c++;
+                    } else {
+                        // Bridge internal QS-grid gaps <= 6 grid columns (24px).
+                        int look = 1;
+                        bool bridge = false;
+                        while (look <= 6 && c + look < gw) {
+                            if (s_col_hits[c + look] >= 4u) {
+                                bridge = true;
+                                break;
+                            }
+                            look++;
+                        }
+                        if (bridge) c += look;
+                        else break;
+                    }
+                }
+                int x0 = c_start * 4;
+                int x1 = min((c_end + 1) * 4, pc.dims.x);
+                int y0 = int(min_y);
+                int y1 = int(max_y);
+                if (x1 - x0 >= 160 && y1 - y0 >= 100 && sum_hits >= 45u) {
+                    uint slot = s_num_rects++;
+                    b_boxes.rects[slot] = ivec4(x0, y0, x1, y1);
+                    b_boxes.params[slot] = vec4(26.0, 48.0, 2.0, float(k));
+                }
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0u) b_boxes.hdr = uvec4(s_num_rects, 0u, 0u, 0u);
+}

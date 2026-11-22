@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- fidebook: legacy HDA card on the Latitude 5300 (snd_hda_intel + ALC3254), replacing sof-soundwire.
+     dras matches <soundcard> against the ALSA card id (/proc/asound/cardN/id), not the long name. -->
+<AudioConfiguration>
+  <soundcard>PCH</soundcard>
+  <audio-config-dir>fidebook-hda-pch</audio-config-dir>
+</AudioConfiguration>

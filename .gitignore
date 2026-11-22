@@ -1,0 +1,83 @@
+# Separate repository
+/gbrunch/
+
+# Google images and extracted trees: GBs, over GitHub's 100 MB file limit. Rebuilt from Google's
+# recovery image (see README "Building from scratch").
+/lapis/parts/
+/lapis/probe/
+/lapis/apex/
+/lapis/patched/
+/lapis/qemu/*.cpio
+*.img
+!/usb/bootdisk.img
+*.apex
+
+# Kernel build trees (the build itself lives in the gbos-ksrc docker volume)
+/kernel/out/
+/kernel/out_isa/
+/kernel/isa_emu_test/t
+
+# Build intermediates. The deployable results ARE tracked:
+#   usb/out/BOOTX64.EFI   current kernel + stage0 initramfs
+#   usb/kmod/*.ko         Bluetooth modules
+#   usb/installer/        Alpine partitioning tools (tools/fetch_installer_tools.sh)
+#   usb/patched/*.so      patched Google libraries (libz, libcrypto)
+#   usb/libkm_compat.so   patched Google library
+#   usb/soft_gk           software Gatekeeper
+#   usb/firmware/         Intel Wi-Fi/Bluetooth firmware (linux-firmware) + regulatory.db
+/usb/out/*
+!/usb/out/BOOTX64.EFI
+# Surface Laptop 7 helper binaries, built by tools/build_surface_tools.sh (not committed)
+/usb/surface/iptsd
+/usb/surface/iptsd-check-device
+/usb/surface/surface-webcam
+/usb/audio/tinymix
+/usb/modroot/
+/usb/stage0.cpio
+/gatekeeper/libs/
+/gatekeeper/soft_gk
+*.o
+__pycache__/
+
+# Logs and run markers
+*.log
+*.done
+
+# Built gbOS86 images (Google OS inside: never commit or share)
+/dist/
+
+# gbOS86 generic-hardware payload, regenerated (not committed: ~300 MB firmware, ~1 GB-class module tree):
+#   tools/fetch_firmware.sh        -> usb/firmware/** (linux-firmware + sof-bin subset; FIRMWARE_SOURCE.txt records versions)
+#   kernel/isa_emu_patch/build_generic*.sh -> usb/modules/ (full depmod'ed module tree)
+# Files that were already tracked (iwlwifi-9000 ucode, ibt-17-16-1, regulatory.db) stay tracked.
+/usb/firmware/*/
+!/usb/firmware/intel/
+/usb/firmware/intel/*
+/usb/modules/
+/usb/firmware/iwlwifi-*
+!/usb/firmware/iwlwifi-9000-pu-b0-jf-b0-46.ucode
+/usb/firmware/*.bin
+/tools/rollback_*.sh
+
+# website runtime data
+/website/data/
+
+# one-command build downloads
+/build/
+
+# SwiftShader Vulkan HAL for AMD GPUs (24 MB): fetched by build.sh from the GitHub release (tools/swiftshader-android builds it)
+/usb/patched/vulkan.swiftshader.so
+# RADV Android HAL (13 MB): built by tools/radv-android/build.sh, copied to usb/patched/ by hand
+/usb/patched/vulkan.radv.so
+
+
+# KernelSU's userspace (19 MB): fetched by build.sh from the KernelSU release on GitHub
+# (the kernel only accepts a manager APK with the official signing certificate)
+/usb/ksu/manager.apk
+/usb/ksu/ksud
+
+# Local backups and build scratch
+/bluetooth-v2-backup*/
+/fidebookos-pre-rebrand-backup/
+/magicos10-s23fe/
+/tools/fidebook-setup/out/

@@ -1,0 +1,243 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "glass_common.glsl"
+
+// Rounded-box SDF meniscus, Snell refraction and foreground-preserving SRC_OVER.
+// Optics adapted from Kyant0/AndroidLiquidGlass (Backdrop) and styropyr0/Prismal.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0, rgba8) readonly uniform image2D u_comp;
+layout(set = 0, binding = 1, rgba8) readonly uniform image2D u_ov0;
+layout(set = 0, binding = 2, rgba8) readonly uniform image2D u_ov1;
+layout(set = 0, binding = 3, rgba8) readonly uniform image2D u_ov2;
+layout(set = 0, binding = 4) readonly buffer BoxBuf {
+    uvec4 hdr;
+    ivec4 rects[8];
+    vec4  params[8];
+} b_boxes;
+layout(set = 0, binding = 5, rgba8) writeonly uniform image2D u_out;
+layout(set = 0, binding = 6, rgba8) readonly uniform image2D u_bg;
+
+float sdRoundedBox(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - (b - vec2(r));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+vec4 eval_overlay_stack(ivec2 c) {
+    vec3 rgb = vec3(0.0);
+    float a = 0.0;
+    if (pc.ov_count >= 1) {
+        vec4 l0 = imageLoad(u_ov0, c);
+        rgb = rgb * (1.0 - l0.a) + l0.rgb;
+        a = a + l0.a * (1.0 - a);
+    }
+    if (pc.ov_count >= 2) {
+        vec4 l1 = imageLoad(u_ov1, c);
+        rgb = rgb * (1.0 - l1.a) + l1.rgb;
+        a = a + l1.a * (1.0 - a);
+    }
+    if (pc.ov_count >= 3) {
+        vec4 l2 = imageLoad(u_ov2, c);
+        rgb = rgb * (1.0 - l2.a) + l2.rgb;
+        a = a + l2.a * (1.0 - a);
+    }
+    return vec4(rgb, a);
+}
+
+// Failure is explicit: there is no neighbour search, raw-app-AHB fallback or
+// recursive sample of the glass output. u_comp must be the real pre-glass scene
+// composed with exactly the premultiplied overlays in eval_overlay_stack().
+bool sample_clean_backdrop(ivec2 raw_c, out vec3 rgb) {
+    ivec2 c = clamp(raw_c, ivec2(0), pc.dims - ivec2(1));
+    vec4 ov = eval_overlay_stack(c);
+    float trans = 1.0 - ov.a;
+    if (trans >= 0.42) {
+        rgb = clamp((imageLoad(u_comp, c).rgb - ov.rgb) / trans,
+                    vec3(0.0), vec3(1.0));
+        return true;
+    }
+    // Only an explicitly validated, pixel-aligned scene permits opaque-carrier
+    // replacement. Current Android integration must leave bg_valid = 0: a raw
+    // AHB guessed from an app producer is NOT proof of a full composed scene.
+    if (pc.bg_valid != 0 && is_taskbar_carrier(ov)) {
+        vec3 live = imageLoad(u_bg, c).rgb;
+        rgb = (pc.bg_swizzle != 0) ? live.bgr : live;
+        return true;
+    }
+    rgb = vec3(0.0);
+    return false;
+}
+
+// Positions use pixel CENTRES (p + 0.5). imageLoad uses integer texel indices,
+// so subtract 0.5 BEFORE floor/fract; otherwise every sample shifts half a pixel.
+// An unavailable nonzero-weight texel invalidates the footprint; do not invent
+// the hidden content by averaging other pixels around an opaque icon/carrier.
+bool sample_optical_backdrop(vec2 pos, out vec3 rgb) {
+    vec2 texel = pos - vec2(0.5);
+    vec2 fl = floor(texel);
+    vec2 fr = texel - fl;
+    ivec2 base = ivec2(fl);
+    rgb = vec3(0.0);
+    for (int y = 0; y < 2; y++) {
+        for (int x = 0; x < 2; x++) {
+            float w = ((x == 0) ? 1.0 - fr.x : fr.x) *
+                      ((y == 0) ? 1.0 - fr.y : fr.y);
+            if (w == 0.0) continue;
+            vec3 tap;
+            if (!sample_clean_backdrop(base + ivec2(x, y), tap)) return false;
+            rgb += tap * w;
+        }
+    }
+    return true;
+}
+
+// A modest five-tap cross blur, with subtle chromatic splitting only at its
+// centre. At most seven bilinear lookups, independent of radius, and no probes.
+// blur_px = 0 retains sharp refraction; positive values clamp to 24 scene pixels.
+bool sample_refracted_backdrop(vec2 pos, vec2 disp, out vec3 rgb) {
+    vec3 red, green, blue;
+    if (!sample_optical_backdrop(pos + disp * 0.985, red)) return false;
+    if (!sample_optical_backdrop(pos + disp, green)) return false;
+    if (!sample_optical_backdrop(pos + disp * 1.015, blue)) return false;
+    rgb = vec3(red.r, green.g, blue.b);
+    float radius = float(clamp(pc.blur_px, 0, 24));
+    if (radius == 0.0) return true;
+    const vec2 DIRS[4] = vec2[4](
+        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)
+    );
+    vec3 acc = rgb * 0.40;
+    for (int i = 0; i < 4; i++) {
+        vec3 tap;
+        if (!sample_optical_backdrop(pos + disp + DIRS[i] * radius, tap)) return false;
+        acc += tap * 0.15;
+    }
+    rgb = acc;
+    return true;
+}
+
+float glass_alpha_field(ivec2 c) {
+    ivec2 cc = clamp(c, ivec2(0), pc.dims - ivec2(1));
+    float a = eval_overlay_stack(cc).a;
+    // Exclude sharp foreground glyphs from the inner QS-tile meniscus field.
+    return (a <= 0.56) ? a : 0.22;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.dims.x || p.y >= pc.dims.y) return;
+
+    vec4 orig_comp = imageLoad(u_comp, p);
+    uint n_rects = min(b_boxes.hdr.x, 8u);
+    if (n_rects == 0u) {
+        imageStore(u_out, p, orig_comp);
+        return;
+    }
+
+    vec2 pf = vec2(p) + vec2(0.5);
+    int hit = -1;
+    float hit_dist = 1.0;
+    vec2 hit_center = vec2(0.0);
+    vec2 hit_half = vec2(1.0);
+    float hit_rad = 22.0;
+    float hit_bevel = 32.0;
+    float hit_kind = 1.0;
+
+    for (uint i = 0u; i < n_rects; i++) {
+        ivec4 r = b_boxes.rects[i];
+        if (p.x < r.x - 1 || p.x > r.z + 1 || p.y < r.y - 1 || p.y > r.w + 1)
+            continue;
+        vec2 c = 0.5 * vec2(float(r.x + r.z), float(r.y + r.w));
+        vec2 hs = 0.5 * vec2(float(r.z - r.x), float(r.w - r.y));
+        float rad = min(b_boxes.params[i].x, min(hs.x, hs.y));
+        float d = sdRoundedBox(pf - c, hs, rad);
+        if (d <= 0.5) {
+            hit = int(i);
+            hit_dist = d;
+            hit_center = c;
+            hit_half = hs;
+            hit_rad = rad;
+            hit_bevel = max(b_boxes.params[i].y, 14.0);
+            hit_kind = b_boxes.params[i].z;
+        }
+    }
+
+    if (hit < 0) {
+        imageStore(u_out, p, orig_comp);
+        return;
+    }
+
+    vec4 ov_here = eval_overlay_stack(p);
+    bool opaque_carrier = hit_kind < 1.5 && is_taskbar_carrier(ov_here);
+    // No effect in transparent gaps or under foreground icons/text. In
+    // particular, an opaque taskbar with no validated scene MUST pass through,
+    // even if a displaced sample happens to land outside its opaque region.
+    if (ov_here.a < 0.085 ||
+        (opaque_carrier ? pc.bg_valid == 0 : 1.0 - ov_here.a < 0.42)) {
+        imageStore(u_out, p, orig_comp);
+        return;
+    }
+
+    // 1. Outer rounded-box SDF meniscus normal (Backdrop + Prismal dome).
+    vec2 rel = pf - hit_center;
+    float dx = sdRoundedBox(rel + vec2(1.0, 0.0), hit_half, hit_rad) -
+               sdRoundedBox(rel - vec2(1.0, 0.0), hit_half, hit_rad);
+    float dy = sdRoundedBox(rel + vec2(0.0, 1.0), hit_half, hit_rad) -
+               sdRoundedBox(rel - vec2(0.0, 1.0), hit_half, hit_rad);
+    vec2 grad = (dx * dx + dy * dy > 1e-5) ? normalize(vec2(dx, dy)) : vec2(0.0, -1.0);
+    float t = clamp(-hit_dist / hit_bevel, 0.0, 1.0);
+    float rim_curve = pow(1.0 - t, 1.65);
+    float sin_theta = clamp(rim_curve * 0.93, 0.0, 0.93);
+
+    // 2. Continuous convex magnifying lens and subtle poured-glass wave.
+    vec2 rn = rel / max(hit_half, vec2(1.0));
+    vec2 convex_lens = rn * (0.24 + 0.16 * dot(rn, rn));
+    vec2 liquid_wave = vec2(sin(rel.y * 0.032 + rel.x * 0.014),
+                            cos(rel.x * 0.032 - rel.y * 0.014)) * 0.048 * t;
+
+    // 3. Secondary inner meniscus for translucent QS tiles and sliders.
+    vec2 tile_tilt = vec2(0.0);
+    float tile_rim = 0.0;
+    if (hit_kind >= 1.5) {
+        float ax = glass_alpha_field(p + ivec2(3, 0)) - glass_alpha_field(p - ivec2(3, 0));
+        float ay = glass_alpha_field(p + ivec2(0, 3)) - glass_alpha_field(p - ivec2(0, 3));
+        vec2 g_tile = vec2(ax, ay);
+        float gm = length(g_tile);
+        if (gm > 0.018) {
+            tile_tilt = -normalize(g_tile) * clamp(gm * 3.4, 0.0, 0.58);
+            tile_rim = clamp(gm * 2.2, 0.0, 0.30);
+        }
+    }
+
+    vec2 xy_slope = grad * sin_theta + convex_lens + liquid_wave + tile_tilt;
+    float slope_sq = dot(xy_slope, xy_slope);
+    vec3 normal = normalize(vec3(xy_slope, sqrt(max(1.0 - min(slope_sq, 0.88), 0.12))));
+
+    // Physical Snell refraction. Dispersion is now subtle, not 0.80/1.22 RGB.
+    float lens_depth = (pc.level == 1) ? 34.0 : ((pc.level == 3) ? 76.0 : 54.0);
+    vec3 refr = refract(vec3(0.0, 0.0, -1.0), normal, 1.0 / 1.54);
+    vec2 disp = refr.xy * lens_depth;
+    vec3 refr_rgb;
+    if (!sample_refracted_backdrop(pf, disp, refr_rgb)) {
+        imageStore(u_out, p, orig_comp);
+        return;
+    }
+
+    float luma = dot(refr_rgb, vec3(0.2126, 0.7152, 0.0722));
+    vec3 vibrant = clamp(mix(vec3(luma), refr_rgb, 1.30), vec3(0.0), vec3(1.0));
+
+    // Dual Blinn-Phong / Fresnel sheen and a crisp crystal rim.
+    float fresnel = pow(1.0 - normal.z, 2.8) * 0.30;
+    float spec_tl = pow(max(dot(normal.xy, normalize(vec2(-0.58, -0.81))), 0.0), 3.5) * (1.0 - t) * 0.50;
+    float spec_br = pow(max(dot(normal.xy, normalize(vec2(0.58, 0.81))), 0.0), 4.5) * (1.0 - t) * 0.24;
+    float crisp_rim = smoothstep(-2.4, -0.2, hit_dist) * 0.32;
+    vec3 glass_backdrop = clamp(
+        vibrant + vec3(fresnel + spec_tl + crisp_rim + tile_rim * 0.65) + vec3(0.76, 0.88, 1.0) * (spec_br + tile_rim * 0.35),
+        vec3(0.0), vec3(1.0)
+    );
+
+    // Preserve the premultiplied foreground exactly; opaque icons exit above.
+    vec3 final_rgb = opaque_carrier ? mix(glass_backdrop, ov_here.rgb, 0.16) :
+                                     glass_backdrop * (1.0 - ov_here.a) + ov_here.rgb;
+    float edge_aa = clamp(0.5 - hit_dist, 0.0, 1.0);
+    vec3 blended = mix(orig_comp.rgb, final_rgb, edge_aa);
+    imageStore(u_out, p, vec4(blended, orig_comp.a));
+}

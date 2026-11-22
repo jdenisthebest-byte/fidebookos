@@ -1,0 +1,56 @@
+#version 450
+// Scroll-motion velocity estimator. Kept separate from the glass 32-byte PC ABI.
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0, rgba8) readonly uniform image2D u_cur;
+layout(set = 0, binding = 1, rgba8) readonly uniform image2D u_hist;
+layout(set = 0, binding = 2) buffer VelBuf { ivec4 vel; } b_vel;
+layout(push_constant) uniform PC { ivec2 dims; } pc;
+shared float s_sad[32];
+const ivec2 CANDS[25] = ivec2[25](
+    ivec2(0, 0),
+    ivec2(0, -6), ivec2(0, 6), ivec2(0, -10), ivec2(0, 10),
+    ivec2(0, -15), ivec2(0, 15), ivec2(0, -22), ivec2(0, 22),
+    ivec2(0, -30), ivec2(0, 30), ivec2(0, -40), ivec2(0, 40),
+    ivec2(0, -52), ivec2(0, 52), ivec2(0, -66), ivec2(0, 66),
+    ivec2(-10, 0), ivec2(10, 0), ivec2(-20, 0), ivec2(20, 0),
+    ivec2(-34, 0), ivec2(34, 0), ivec2(-50, 0), ivec2(50, 0)
+);
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid < 25u) {
+        ivec2 d = CANDS[tid];
+        float acc = 0.0;
+        for (int gy = 0; gy < 8; gy++) {
+            int y = int(float(pc.dims.y) * (0.20 + 0.58 * (float(gy) / 7.0)));
+            int hy = clamp(y + d.y, 56, pc.dims.y - 74);
+            for (int gx = 0; gx < 8; gx++) {
+                int x = int(float(pc.dims.x) * (0.18 + 0.64 * (float(gx) / 7.0)));
+                int hx = clamp(x + d.x, 12, pc.dims.x - 13);
+                vec3 c0 = imageLoad(u_cur, ivec2(x, y)).rgb;
+                vec3 c1 = imageLoad(u_hist, ivec2(hx, hy)).rgb;
+                acc += abs(c0.r - c1.r) + abs(c0.g - c1.g) + abs(c0.b - c1.b);
+            }
+        }
+        s_sad[tid] = acc;
+    }
+    barrier();
+    if (tid == 0u) {
+        float sad0 = s_sad[0];
+        uint best_i = 0u;
+        float best_sad = sad0;
+        for (uint i = 1u; i < 25u; i++) {
+            if (s_sad[i] < best_sad) {
+                best_sad = s_sad[i];
+                best_i = i;
+            }
+        }
+        if (sad0 > 0.22 && best_i != 0u && best_sad < sad0 * 0.78) {
+            ivec2 bd = CANDS[best_i];
+            int bx = clamp(int(round(float(bd.x) * 0.34)), -12, 12);
+            int by = clamp(int(round(float(bd.y) * 0.34)), -12, 12);
+            b_vel.vel = ivec4(bx, by, 1, 0);
+        } else {
+            b_vel.vel = ivec4(0, 0, 0, 0);
+        }
+    }
+}

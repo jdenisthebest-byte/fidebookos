@@ -1,0 +1,27 @@
+#version 450
+// Nine-tap scroll-motion shutter; the original eight-byte motion-blur PC ABI.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0, rgba8) readonly uniform image2D u_cur;
+layout(set = 0, binding = 1, rgba8) writeonly uniform image2D u_hist_out;
+layout(set = 0, binding = 2) readonly buffer VelBuf { ivec4 vel; } b_vel;
+layout(set = 0, binding = 3, rgba8) writeonly uniform image2D u_out;
+layout(push_constant) uniform PC { ivec2 dims; } pc;
+const float W[9] = float[9](0.04, 0.08, 0.12, 0.16, 0.20, 0.16, 0.12, 0.08, 0.04);
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.dims.x || p.y >= pc.dims.y) return;
+    vec4 center = imageLoad(u_cur, p);
+    imageStore(u_hist_out, p, center);
+    ivec2 v = b_vel.vel.xy;
+    if ((v.x == 0 && v.y == 0) || p.y < 52 || p.y >= pc.dims.y - 72) {
+        imageStore(u_out, p, center);
+        return;
+    }
+    vec4 sum_rgba = vec4(0.0);
+    for (int k = -4; k <= 4; k++) {
+        ivec2 off = ivec2(round(vec2(v) * (float(k) / 4.0)));
+        ivec2 sp = clamp(p + off, ivec2(0, 52), ivec2(pc.dims.x - 1, pc.dims.y - 73));
+        sum_rgba += imageLoad(u_cur, sp) * W[k + 4];
+    }
+    imageStore(u_out, p, vec4(sum_rgba.rgb, max(center.a, sum_rgba.a)));
+}

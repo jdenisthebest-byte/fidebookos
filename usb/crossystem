@@ -1,0 +1,8 @@
+#!/system/bin/sh
+# FideBookOS fake crossystem: reports slot A, accepts writes.
+case "$1" in
+  mainfw_act) echo -n A ;;
+  fwid|ro_fwid) echo -n FideBook_OS.1_0.0 ;;
+  *=*) exit 0 ;;
+  *) echo -n 0 ;;
+esac
