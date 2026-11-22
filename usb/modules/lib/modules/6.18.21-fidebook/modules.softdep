@@ -1,0 +1,3 @@
+# Soft dependencies extracted from modules themselves.
+softdep r8169 pre: realtek
+softdep snd_sof_intel_hda pre: snd-hda-codec-hdmi

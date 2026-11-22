@@ -261,9 +261,10 @@ if [ "$BUILD_TYPE" = "dualboot" ]; then
   sudo sh tools/install_dualboot.sh --target "$TARGET_DISK" --data-size "${DATA_GB}G" $EXTRA_FLAGS
 else
   say "4/4 building FideBookOS image ($BUILD_TYPE)"
-  MAKE_FLAGS="--type $BUILD_TYPE --data-size $DATA_GB"
-  [ "$AUTO_TAILOR" = 1 ] && MAKE_FLAGS="$MAKE_FLAGS --auto"
-  sh tools/make_fidebookos_image.sh $MAKE_FLAGS
+  set -- --type "$BUILD_TYPE"
+  [ "$BUILD_TYPE" != looper ] || set -- "$@" --data-size "$DATA_GB"
+  [ "$AUTO_TAILOR" != 1 ] || set -- "$@" --auto
+  sh tools/make_fidebookos_image.sh "$@"
   echo
   echo "Done. Flash the .img in dist/ to a USB stick or target drive (balenaEtcher, Rufus, or dd), then boot it."
 fi

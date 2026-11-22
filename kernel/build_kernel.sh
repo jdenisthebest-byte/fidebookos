@@ -8,7 +8,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 JOBS=${2:-$(nproc)}
 VOL=gbos-ksrc
 C=/build/inputs/clang-r584948c
-MT7902_SRC="${MT7902_SRC:-$ROOT/../mt7902_driver/mt7902/src}"
+if [ -z "${MT7902_SRC:-}" ]; then
+  MT7902_SRC="$ROOT/kernel/mt7902"
+  [ -d "$MT7902_SRC" ] || MT7902_SRC="$ROOT/../mt7902_driver/mt7902/src"
+fi
 
 BASE=${1:-}
 W=$(mktemp -d "${TMPDIR:-/tmp}/kcfg.XXXXXX"); trap 'rm -rf "$W"' EXIT

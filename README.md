@@ -32,6 +32,26 @@
 
 ## Build & Flash
 
+The checkout includes the FideBookOS EFI boot file, its matching kernel modules, the
+R5 device firmware, BusyBox, AMD graphics drivers, KernelSU tools, and the installer
+payload. To assemble an image you also need Google's pinned `lapis` recovery.
+Keep the recovery and its extracted partitions local. On Linux, install Python 3,
+curl, xz, dosfstools, mtools, and util-linux (including `sfdisk`).
+Install e2fsprogs as well for a persistent image.
+
+```sh
+# Preview the input requirements without downloading or writing an image.
+./build.sh --standard --dry-run
+
+# Prompt for the recovery download if needed, then build the standard installer.
+./build.sh --standard
+```
+
+If the six partitions from the specified recovery are already in `lapis/parts/`,
+the image builder can work offline. Run
+`sh tools/make_fidebookos_image.sh --check` to validate the inputs first.
+See [the bundled build payload](docs/build-payload.md) for source and rebuild details.
+
 ```sh
 # Build the standard FideBookOS 1.25 Live USB + Graphical Installer image:
 sh tools/make_fidebookos_image.sh --output dist/FideBookOS-1.25.img
